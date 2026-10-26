@@ -7,7 +7,7 @@
 namespace chat::dto {
 // Input only: do not log request bodies or passwords.
 struct RegisterRequest { std::string email; std::string username; std::string password; };
-struct LoginRequest { std::string email; std::string password; };
+struct LoginRequest { std::string identifier; std::string password; };
 struct UpdateMeRequest { std::optional<std::string> email; std::optional<std::string> username; };
 
 // Safe output allowlist. Models and request DTOs are not response DTOs.

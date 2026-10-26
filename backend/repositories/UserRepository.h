@@ -19,6 +19,10 @@ public:
     drogon::Task<std::optional<User>> findById(UserId id);
     drogon::Task<std::optional<User>> findByEmail(std::string email);
     drogon::Task<std::optional<User>> findByUsername(std::string username);
+    // AuthService injects a transaction before calling this row-locking lookup.
+    drogon::Task<std::optional<User>> findByIdentifierForUpdate(std::string identifier, bool isEmail);
+    drogon::Task<Timestamp> databaseNow();
+    drogon::Task<bool> updatePasswordHash(UserId id, std::string passwordHash);
     drogon::Task<std::optional<int>> recordFailedLogin(UserId id);
     // Successful login clears both the counter and lockout.
     drogon::Task<bool> resetFailedLogins(UserId id);

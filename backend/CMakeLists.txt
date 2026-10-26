@@ -4,8 +4,15 @@ set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
 find_package(Drogon CONFIG REQUIRED)
+find_package(Threads REQUIRED)
+find_path(SODIUM_INCLUDE_DIR sodium.h REQUIRED)
+find_library(SODIUM_LIBRARY sodium REQUIRED)
+add_library(Sodium::Sodium UNKNOWN IMPORTED)
+set_target_properties(Sodium::Sodium PROPERTIES
+    IMPORTED_LOCATION "${SODIUM_LIBRARY}"
+    INTERFACE_INCLUDE_DIRECTORIES "${SODIUM_INCLUDE_DIR}")
 
-add_library(chat_config config/Config.cc)
+add_library(chat_config config/Config.cc config/AuthConfig.cc)
 target_include_directories(chat_config PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})
 target_link_libraries(chat_config PUBLIC Drogon::Drogon)
 
@@ -21,9 +28,17 @@ target_include_directories(chat_repositories PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})
 target_link_libraries(chat_repositories PUBLIC Drogon::Drogon)
 target_compile_options(chat_repositories PRIVATE -Wall -Wextra -Wpedantic)
 
+add_library(chat_auth
+    services/AuthPolicy.cc services/AuthService.cc
+    utils/AuthCrypto.cc utils/AuthHttp.cc)
+target_include_directories(chat_auth PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})
+target_link_libraries(chat_auth PUBLIC chat_config chat_validators chat_repositories Sodium::Sodium Threads::Threads)
+target_compile_options(chat_auth PRIVATE -Wall -Wextra -Wpedantic)
+
 add_executable(chat_backend main.cc controllers/HealthController.cc
+    controllers/AuthController.cc filters/AuthFilter.cc
     services/HealthService.cc repositories/HealthRepository.cc)
-target_link_libraries(chat_backend PRIVATE chat_config chat_validators chat_repositories)
+target_link_libraries(chat_backend PRIVATE chat_config chat_validators chat_repositories chat_auth)
 target_compile_options(chat_backend PRIVATE -Wall -Wextra -Wpedantic)
 
 include(CTest)
@@ -35,6 +50,16 @@ if(BUILD_TESTING)
     add_executable(validator_tests tests/ValidatorTest.cc)
     target_link_libraries(validator_tests PRIVATE chat_validators)
     add_test(NAME validator_tests COMMAND validator_tests)
+
+    add_executable(auth_tests tests/AuthTest.cc)
+    target_link_libraries(auth_tests PRIVATE chat_auth)
+    add_test(NAME auth_tests COMMAND auth_tests)
+    set_tests_properties(auth_tests PROPERTIES TIMEOUT 30)
+
+    add_executable(auth_http_tests tests/AuthHttpTest.cc)
+    target_link_libraries(auth_http_tests PRIVATE chat_auth)
+    add_test(NAME auth_http_tests COMMAND auth_http_tests)
+    set_tests_properties(auth_http_tests PROPERTIES TIMEOUT 10)
 
     add_executable(repository_tests tests/RepositoryTest.cc)
     target_link_libraries(repository_tests PRIVATE chat_repositories chat_config)

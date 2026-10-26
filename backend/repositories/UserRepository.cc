@@ -123,4 +123,47 @@ drogon::Task<bool> UserRepository::setLockedUntil(UserId id, std::optional<Times
         co_return rows.affectedRows() == 1;
     } catch (const drogon::orm::DrogonDbException &) { throw RepositoryError{}; }
 }
+
+drogon::Task<std::optional<User>> UserRepository::findByIdentifierForUpdate(std::string identifier, bool isEmail) {
+    try {
+        if (!std::dynamic_pointer_cast<drogon::orm::Transaction>(db_)) throw RepositoryError{};
+        auto db = client();
+        if (isEmail) {
+            auto rows = co_await db->execSqlCoro(R"SQL(
+                SELECT id, email, username, password_hash,
+                (extract(epoch FROM created_at) * 1000000)::bigint AS created_at_us,
+                (extract(epoch FROM updated_at) * 1000000)::bigint AS updated_at_us,
+                failed_login_count,
+                (extract(epoch FROM locked_until) * 1000000)::bigint AS locked_until_us FROM users WHERE lower(email) = lower($1) FOR UPDATE
+            )SQL", identifier);
+            if (rows.empty()) co_return std::nullopt;
+            co_return userFromRow(rows[0]);
+        }
+        auto rows = co_await db->execSqlCoro(R"SQL(
+            SELECT id, email, username, password_hash,
+                (extract(epoch FROM created_at) * 1000000)::bigint AS created_at_us,
+                (extract(epoch FROM updated_at) * 1000000)::bigint AS updated_at_us,
+                failed_login_count,
+                (extract(epoch FROM locked_until) * 1000000)::bigint AS locked_until_us FROM users WHERE lower(username) = lower($1) FOR UPDATE
+        )SQL", identifier);
+        if (rows.empty()) co_return std::nullopt;
+        co_return userFromRow(rows[0]);
+    } catch (const drogon::orm::DrogonDbException &) { throw RepositoryError{}; }
+}
+
+drogon::Task<Timestamp> UserRepository::databaseNow() {
+    try {
+        auto rows = co_await client()->execSqlCoro(
+            "SELECT (extract(epoch FROM clock_timestamp()) * 1000000)::bigint AS now_us");
+        co_return repository_detail::timestamp(rows[0]["now_us"]);
+    } catch (const drogon::orm::DrogonDbException &) { throw RepositoryError{}; }
+}
+
+drogon::Task<bool> UserRepository::updatePasswordHash(UserId id, std::string passwordHash) {
+    try {
+        auto rows = co_await client()->execSqlCoro(
+            "UPDATE users SET password_hash = $2, updated_at = now() WHERE id = $1", id, passwordHash);
+        co_return rows.affectedRows() == 1;
+    } catch (const drogon::orm::DrogonDbException &) { throw RepositoryError{}; }
+}
 }
