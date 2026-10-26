@@ -130,6 +130,36 @@ drogon::Task<std::optional<User>> AuthService::validateSession(std::string token
     if (!active) co_return std::nullopt;
     co_return active->user;
 }
+
+drogon::Task<UpdateMeResult> AuthService::updateMe(UserId authenticatedId, dto::UpdateMeRequest input) {
+    if (authenticatedId <= 0) co_return NoAuthenticatedUser{};
+    std::vector<dto::FieldError> errors;
+    if (!input.email && !input.username)
+        errors.push_back({"body", "EMPTY_PATCH", "Provide email or username"});
+    if (input.email) {
+        auto result = validation::validateEmail(*input.email);
+        errors.insert(errors.end(), result.errors.begin(), result.errors.end());
+        if (result.valid) input.email = std::move(result.normalized);
+    }
+    if (input.username) {
+        auto result = validation::validateUsername(*input.username);
+        errors.insert(errors.end(), result.errors.begin(), result.errors.end());
+        if (result.valid) input.username = std::move(result.normalized);
+    }
+    if (!errors.empty()) co_return InvalidInput{std::move(errors)};
+    UserRepository users(client());
+    auto result = co_await users.updateProfile(authenticatedId, std::move(input.email), std::move(input.username));
+    if (const auto *user = std::get_if<User>(&result)) co_return ProfileUpdated{dto::toUserResponse(*user)};
+    if (std::holds_alternative<UserNotFound>(result)) co_return NoAuthenticatedUser{};
+    if (std::get<CreateUserError>(result) == CreateUserError::EmailTaken) co_return EmailTaken{};
+    co_return UsernameTaken{};
+}
+
+drogon::Task<std::size_t> AuthService::deleteExpiredSessions() {
+    SessionRepository sessions(client());
+    co_return co_await sessions.deleteExpired();
+}
+
 AuthService &authService() {
     static AuthService service(loadAuthConfig());
     return service;

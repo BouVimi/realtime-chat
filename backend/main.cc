@@ -3,6 +3,8 @@
 #include "utils/HttpError.h"
 #include <iostream>
 #include <cstdio>
+#include <atomic>
+#include <memory>
 #include "services/AuthService.h"
 #include "utils/AuthHttp.h"
 int main(int argc, char **argv) {
@@ -41,6 +43,20 @@ int main(int argc, char **argv) {
             LOG_ERROR << "Unhandled request exception";
             callback(chat::error(drogon::k500InternalServerError,
                                  "INTERNAL_ERROR", "Internal server error"));
+        });
+        drogon::app().registerBeginningAdvice([&auth] {
+            auto running = std::make_shared<std::atomic_bool>(false);
+            auto cleanup = [&auth, running] {
+                if (running->exchange(true)) return; // Do not overlap slow cleanup runs.
+                drogon::async_run([&auth, running]() -> drogon::Task<void> {
+                    try { co_await auth.deleteExpiredSessions(); }
+                    catch (...) { LOG_WARN << "Expired session cleanup failed"; }
+                    running->store(false);
+                    co_return;
+                });
+            };
+            cleanup();
+            drogon::app().getLoop()->runEvery(3600.0, cleanup);
         });
         drogon::app().run();
     } catch (const std::exception &) {

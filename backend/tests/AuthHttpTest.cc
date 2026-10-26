@@ -30,6 +30,13 @@ int main() {
         check(!guardRequest(request(R"({"password":"a/b\\/c"})"), config), "slashes inside strings remain data");
         for (auto body : {"{", "null", "[]", "{} {}", "{\"x\":1,\"x\":2}", "{/*comment*/}", "{\"x\":1,}"})
             status(guardRequest(request(body), config), 400);
+        auto emptyPatch = drogon::HttpRequest::newHttpRequest();
+        emptyPatch->setMethod(drogon::Patch);
+        emptyPatch->setPath("/api/v1/users/me");
+        check(!guardRequest(emptyPatch, config) && !jsonBody(emptyPatch), "empty PATCH is handled by its controller");
+        auto patch = request(R"({"email":" ALICE@EXAMPLE.COM "})");
+        patch->setMethod(drogon::Patch); patch->setPath("/api/v1/users/me");
+        check(!guardRequest(patch, config) && jsonBody(patch), "PATCH JSON parsed before authentication");
         auto emptyLogout = drogon::HttpRequest::newHttpRequest();
         emptyLogout->setMethod(drogon::Post);
         emptyLogout->setPath("/api/v1/auth/logout");

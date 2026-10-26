@@ -14,12 +14,17 @@ using RegisterResult = std::variant<Registered, InvalidInput, EmailTaken, Userna
 struct InvalidCredentials {}; // Includes unknown users and locked accounts.
 struct LoggedIn { dto::UserResponse user; std::string token; Timestamp expiresAt; int maxAge{}; };
 using LoginResult = std::variant<LoggedIn, InvalidCredentials>;
+struct ProfileUpdated { dto::UserResponse user; };
+struct NoAuthenticatedUser {};
+using UpdateMeResult = std::variant<ProfileUpdated, InvalidInput, EmailTaken, UsernameTaken, NoAuthenticatedUser>;
 
 class AuthService {
 public:
     explicit AuthService(AuthConfig config, drogon::orm::DbClientPtr db = {});
     drogon::Task<RegisterResult> registerUser(std::string email, std::string username, std::string password);
     drogon::Task<LoginResult> login(std::string identifier, std::string password);
+    drogon::Task<UpdateMeResult> updateMe(UserId authenticatedId, dto::UpdateMeRequest input);
+    drogon::Task<std::size_t> deleteExpiredSessions();
     drogon::Task<bool> logout(std::string token);
     drogon::Task<std::optional<User>> validateSession(std::string token);
     const AuthConfig &config() const { return config_; }

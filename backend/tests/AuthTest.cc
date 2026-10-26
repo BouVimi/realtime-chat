@@ -106,6 +106,16 @@ int main() {
                     auto invalid = co_await service.registerUser("bad", "1?", "short");
                     check(std::holds_alternative<InvalidInput>(invalid), "typed registration validation");
                     check(!std::get<InvalidInput>(invalid).fields.empty(), "registration field errors");
+                    dto::UpdateMeRequest emptyPatch;
+                    auto emptyResult = co_await service.updateMe(1, emptyPatch);
+                    check(std::holds_alternative<InvalidInput>(emptyResult), "empty profile patch rejected before DB");
+                    dto::UpdateMeRequest invalidPatch;
+                    invalidPatch.email = "bad"; invalidPatch.username = "1?";
+                    auto invalidProfile = co_await service.updateMe(1, invalidPatch);
+                    check(std::holds_alternative<InvalidInput>(invalidProfile), "profile validators used before DB");
+                    check(std::get<InvalidInput>(invalidProfile).fields.size() >= 2, "profile field errors collected");
+                    auto noIdentity = co_await service.updateMe(0, invalidPatch);
+                    check(std::holds_alternative<NoAuthenticatedUser>(noIdentity), "profile requires authenticated identity");
                     check(!(co_await service.validateSession("malformed")), "invalid session bypasses database");
                     check(!(co_await service.logout("malformed")), "invalid logout bypasses database");
                     auto work = co_await executor.run([] { return CryptoResult{true, hashPassword("Cobalt7!Sunrise")}; });

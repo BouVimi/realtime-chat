@@ -10,12 +10,17 @@
 namespace chat {
 enum class CreateUserError { EmailTaken, UsernameTaken };
 using CreateUserResult = std::variant<User, CreateUserError>;
+struct UserNotFound {};
+using UpdateUserResult = std::variant<User, CreateUserError, UserNotFound>;
 
 class UserRepository {
 public:
     // Inject a normal client or transaction in tests. Otherwise resolve it lazily.
     explicit UserRepository(drogon::orm::DbClientPtr db = {}) : db_(std::move(db)) {}
     drogon::Task<CreateUserResult> createUser(std::string email, std::string username, std::string passwordHash);
+    // Regular client only: each update is one atomic autocommit statement.
+    drogon::Task<UpdateUserResult> updateProfile(UserId id, std::optional<std::string> email,
+                                                std::optional<std::string> username);
     drogon::Task<std::optional<User>> findById(UserId id);
     drogon::Task<std::optional<User>> findByEmail(std::string email);
     drogon::Task<std::optional<User>> findByUsername(std::string username);

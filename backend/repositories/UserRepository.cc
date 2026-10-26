@@ -166,4 +166,61 @@ drogon::Task<bool> UserRepository::updatePasswordHash(UserId id, std::string pas
         co_return rows.affectedRows() == 1;
     } catch (const drogon::orm::DrogonDbException &) { throw RepositoryError{}; }
 }
+
+
+drogon::Task<UpdateUserResult> UserRepository::updateProfile(
+    UserId id, std::optional<std::string> email, std::optional<std::string> username) {
+    // A failed UPDATE must roll back independently, so conflict diagnosis uses a fresh snapshot.
+    // Drogon transactions auto-rollback on errors; never diagnose via an aborted transaction.
+    if (std::dynamic_pointer_cast<drogon::orm::Transaction>(db_) || (!email && !username))
+        throw RepositoryError{};
+    auto db = client();
+    const std::int32_t hasEmail = email.has_value() ? 1 : 0;
+    const std::int32_t hasUsername = username.has_value() ? 1 : 0;
+    const std::string emailValue = email.value_or("");
+    const std::string usernameValue = username.value_or("");
+    for (int attempt = 0; attempt < 3; ++attempt) {
+        bool failed = false;
+        try {
+            auto rows = co_await db->execSqlCoro(R"SQL(
+                UPDATE users AS u
+                SET email = CASE WHEN $2::integer = 1 THEN $3::text ELSE u.email END,
+                    username = CASE WHEN $4::integer = 1 THEN $5::text ELSE u.username END,
+                    updated_at = now()
+                WHERE u.id = $1
+                  AND ($2::integer = 0 OR NOT EXISTS (
+                    SELECT 1 FROM users other
+                    WHERE lower(other.email) = lower($3::text) AND other.id <> $1))
+                  AND ($4::integer = 0 OR NOT EXISTS (
+                    SELECT 1 FROM users other
+                    WHERE lower(other.username) = lower($5::text) AND other.id <> $1))
+                RETURNING id, email, username, password_hash,
+                    (extract(epoch FROM created_at) * 1000000)::bigint AS created_at_us,
+                    (extract(epoch FROM updated_at) * 1000000)::bigint AS updated_at_us,
+                    failed_login_count,
+                    (extract(epoch FROM locked_until) * 1000000)::bigint AS locked_until_us
+            )SQL", id, hasEmail, emailValue, hasUsername, usernameValue);
+            if (!rows.empty()) co_return userFromRow(rows[0]);
+        } catch (const drogon::orm::DrogonDbException &) {
+            // A concurrent writer can still hit the unique index after the prechecks.
+            // The autocommit UPDATE is atomic: neither field was partially committed.
+            failed = true;
+        }
+        try {
+            auto conflicts = co_await db->execSqlCoro(R"SQL(
+                SELECT EXISTS(SELECT 1 FROM users WHERE id = $1) AS user_exists,
+                    EXISTS(SELECT 1 FROM users WHERE $2::integer = 1
+                        AND lower(email) = lower($3::text) AND id <> $1) AS email_taken,
+                    EXISTS(SELECT 1 FROM users WHERE $4::integer = 1
+                        AND lower(username) = lower($5::text) AND id <> $1) AS username_taken
+            )SQL", id, hasEmail, emailValue, hasUsername, usernameValue);
+            if (!conflicts[0]["user_exists"].as<bool>()) co_return UserNotFound{};
+            if (conflicts[0]["email_taken"].as<bool>()) co_return CreateUserError::EmailTaken;
+            if (conflicts[0]["username_taken"].as<bool>()) co_return CreateUserError::UsernameTaken;
+        } catch (const drogon::orm::DrogonDbException &) { throw RepositoryError{}; }
+        if (failed) throw RepositoryError{}; // Unexpected infrastructure failure, not invalid input.
+        // A conflicting row may have been deleted between statements; retry a bounded number of times.
+    }
+    throw RepositoryError{};
+}
 }

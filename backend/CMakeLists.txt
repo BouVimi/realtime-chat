@@ -61,6 +61,12 @@ if(BUILD_TESTING)
     add_test(NAME auth_http_tests COMMAND auth_http_tests)
     set_tests_properties(auth_http_tests PROPERTIES TIMEOUT 10)
 
+    add_executable(auth_controller_tests tests/AuthControllerTest.cc
+        controllers/AuthController.cc filters/AuthFilter.cc)
+    target_link_libraries(auth_controller_tests PRIVATE chat_auth)
+    add_test(NAME auth_controller_tests COMMAND auth_controller_tests)
+    set_tests_properties(auth_controller_tests PROPERTIES TIMEOUT 30)
+
     add_executable(repository_tests tests/RepositoryTest.cc)
     target_link_libraries(repository_tests PRIVATE chat_repositories chat_config)
     add_test(NAME repository_tests COMMAND repository_tests ${CMAKE_CURRENT_SOURCE_DIR}/config/config.json)

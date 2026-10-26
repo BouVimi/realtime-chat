@@ -31,6 +31,7 @@ def database():
 
 class AuthFlow(unittest.TestCase):
     created = []
+    known_tokens = set()
 
     def call(self, path, data=None, cookie=None, origin=ORIGIN, content_type="application/json", raw=None, method=None):
         headers = {}
@@ -52,7 +53,46 @@ class AuthFlow(unittest.TestCase):
         with response:
             payload = response.read()
             parsed = json.loads(payload) if payload else None
+            jar = SimpleCookie()
+            jar.load(response.headers.get("Set-Cookie", ""))
+            if "session" in jar and jar["session"].value:
+                self.known_tokens.add(jar["session"].value)
+            if cookie:
+                sent = SimpleCookie(); sent.load(cookie)
+                if "session" in sent and sent["session"].value:
+                    self.known_tokens.add(sent["session"].value)
+            self.no_secrets(parsed)
+            if path == "/api/v1/auth/login" and response.status == 200:
+                self.session(response.headers)  # Check flags on every successful login.
             return response.status, parsed, response.headers, elapsed
+
+    def no_secrets(self, body):
+        forbidden = {"password", "password_hash", "passwordHash", "token", "session_token", "token_hash", "tokenHash"}
+        def walk(value):
+            if isinstance(value, dict):
+                self.assertTrue(not (set(value) & forbidden), "Sensitive field in response body")
+                for child in value.values(): walk(child)
+            elif isinstance(value, list):
+                for child in value: walk(child)
+        walk(body)
+        encoded = json.dumps(body)
+        self.assertTrue(all(token not in encoded for token in self.known_tokens), "Token exposed in response body")
+        self.assertTrue(PASSWORD not in encoded, "Password exposed in response body")
+
+    def authenticated_account(self):
+        name, email, user_id = self.account()
+        status, _, headers, _ = self.login(name)
+        self.assertEqual(status, 200)
+        return name, email, user_id, self.session(headers)
+
+    def profile(self, cookie):
+        status, body, _, _ = self.call("/api/v1/users/me", cookie=cookie)
+        self.assertEqual(status, 200)
+        self.safe_user(body)
+        return body["user"]
+
+    def patch(self, data, cookie=None):
+        return self.call("/api/v1/users/me", data=data, cookie=cookie, method="PATCH")
 
     def account(self):
         name = "u" + uuid.uuid4().hex[:18]
@@ -77,7 +117,7 @@ class AuthFlow(unittest.TestCase):
     def session(self, headers):
         jar = SimpleCookie()
         jar.load(headers.get("Set-Cookie", ""))
-        self.assertIn("session", jar)
+        self.assertTrue("session" in jar, "Session cookie missing")
         value = jar["session"]
         self.assertTrue(bool(value["httponly"]))
         self.assertEqual(value["samesite"].lower(), "lax")
@@ -162,6 +202,90 @@ class AuthFlow(unittest.TestCase):
         self.assertEqual(self.call("/api/v1/users/me", cookie=cookie)[0], 401)
         self.assertEqual(self.call("/api/v1/auth/logout", method="POST")[0], 401)
 
+    def test_patch_success_keeps_session(self):
+        _, email, user_id, cookie = self.authenticated_account()
+        before = self.profile(cookie)
+        username = "p" + uuid.uuid4().hex[:18]
+        normalized = "p" + uuid.uuid4().hex[:18] + "@example.invalid"
+        status, body, headers, _ = self.patch({"email": "  " + normalized.upper() + "  ",
+                                             "username": username}, cookie)
+        self.assertEqual(status, 200)
+        self.safe_user(body)
+        self.assertEqual(body["user"]["id"], user_id)
+        self.assertEqual(body["user"]["email"], normalized)
+        self.assertEqual(body["user"]["username"], username)
+        self.assertGreaterEqual(body["user"]["updated_at"], before["updated_at"])
+        self.assertIsNone(headers.get("Set-Cookie"))  # Existing session is retained.
+        self.assertEqual(self.profile(cookie), body["user"])
+        self.assertEqual(self.login(username.upper())[0], 200)
+        self.assertEqual(self.login(normalized.upper())[0], 200)
+        # Matching our own identity with different case is not a conflict.
+        self.assertEqual(self.patch({"email": normalized.upper()}, cookie)[0], 200)
+        self.assertEqual(self.profile(cookie)["id"], user_id)
+
+    def test_patch_taken_email_is_atomic(self):
+        _, _, _, cookie = self.authenticated_account()
+        _, taken, _ = self.account()
+        before = self.profile(cookie)
+        status, body, _, _ = self.patch({"email": " " + taken.upper() + " ",
+                                        "username": "p" + uuid.uuid4().hex[:18]}, cookie)
+        self.assertEqual(status, 409)
+        self.assertEqual(body["error"]["code"], "EMAIL_TAKEN")
+        self.assertEqual(self.profile(cookie), before)
+
+    def test_patch_taken_username_is_atomic(self):
+        _, _, _, cookie = self.authenticated_account()
+        taken, _, _ = self.account()
+        before = self.profile(cookie)
+        status, body, _, _ = self.patch({"username": taken.upper(),
+            "email": "p" + uuid.uuid4().hex[:18] + "@example.invalid"}, cookie)
+        self.assertEqual(status, 409)
+        self.assertEqual(body["error"]["code"], "USERNAME_TAKEN")
+        self.assertEqual(self.profile(cookie), before)
+
+    def test_patch_validation_and_empty_body(self):
+        _, _, _, cookie = self.authenticated_account()
+        before = self.profile(cookie)
+        for data in ({"username": "1bad!"}, {"email": "bad"}, {"email": None}, {}, {"username": 12}):
+            status, body, _, _ = self.patch(data, cookie)
+            self.assertEqual(status, 400)
+            self.assertTrue(body["error"]["code"] == "INVALID_INPUT", "Expected field validation error")
+            self.assertEqual(self.profile(cookie), before)
+        status, body, _, _ = self.call("/api/v1/users/me", cookie=cookie, method="PATCH")
+        self.assertEqual(status, 400)
+        self.assertEqual(body["error"]["code"], "INVALID_JSON")
+        self.assertEqual(self.profile(cookie), before)
+
+    def test_patch_without_cookie(self):
+        status, body, _, _ = self.patch({"username": "Different_Name"})
+        self.assertEqual(status, 401)
+        self.assertEqual(body["error"]["code"], "UNAUTHORIZED")
+
+    def test_patch_rejects_mass_assignment_without_effect(self):
+        _, _, _, cookie = self.authenticated_account()
+        _, _, victim_id, victim_cookie = self.authenticated_account()
+        before = self.profile(cookie)
+        victim_before = self.profile(victim_cookie)
+        for data in ({"id": victim_id, "username": "p" + uuid.uuid4().hex[:18]},
+                     {"password_hash": "not-a-real-hash", "email": "p" + uuid.uuid4().hex[:18] + "@example.invalid"},
+                     {"password": "Different7!Password"}, {"unexpected": True}):
+            status, body, _, _ = self.patch(data, cookie)
+            self.assertEqual(status, 400)
+            self.assertEqual(body["error"]["code"], "INVALID_INPUT")
+            self.assertEqual(self.profile(cookie), before)
+            self.assertEqual(self.profile(victim_cookie), victim_before)
+        self.assertEqual(self.login(before["username"])[0], 200)
+
+    @unittest.skipUnless(os.getenv("AUTH_TEST_DB") == "1", "Set AUTH_TEST_DB=1 for updated_at precision check")
+    def test_patch_sets_updated_at_in_database(self):
+        _, _, user_id, cookie = self.authenticated_account()
+        with database() as conn:
+            before = conn.execute("SELECT clock_timestamp()").fetchone()[0]
+        self.assertEqual(self.patch({"username": "p" + uuid.uuid4().hex[:18]}, cookie)[0], 200)
+        with database() as conn:
+            after = conn.execute("SELECT updated_at FROM users WHERE id = %s", (int(user_id),)).fetchone()[0]
+        self.assertGreaterEqual(after, before)
+
     def test_lockout(self):
         name, _, _ = self.account()
         for _ in range(4):
@@ -189,7 +313,10 @@ class AuthFlow(unittest.TestCase):
     def test_json_and_origin(self):
         # Register/login still require input, but an absent body is not a MIME error.
         for path in ("/api/v1/auth/register", "/api/v1/auth/login"):
-            self.assertEqual(self.call(path, method="POST")[0], 400)
+            status, body, _, _ = self.call(path, method="POST")
+            self.assertEqual(status, 400)
+            self.assertTrue(body == {"error": {"code": "INVALID_JSON", "message": "JSON object body is required"}},
+                            "Missing bodies must produce the documented JSON error")
         for raw in (b"{", b"[]", b"{} {}", b'{"x":1,"x":2}'):
             self.assertEqual(self.call("/api/v1/auth/login", raw=raw)[0], 400)
         deep = b'{"x":' + b'[' * 100 + b'0' + b']' * 100 + b'}'
