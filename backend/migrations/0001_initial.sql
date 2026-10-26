@@ -1,0 +1,1 @@
+-- Intentionally empty baseline. Applied transactionally by scripts/migrate.py.

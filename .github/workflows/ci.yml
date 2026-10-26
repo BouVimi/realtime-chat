@@ -1,0 +1,59 @@
+name: phase0
+on: [push, pull_request]
+jobs:
+  test:
+    runs-on: ubuntu-24.04
+    services:
+      postgres:
+        image: postgres:17.6-bookworm
+        env:
+          POSTGRES_USER: chat
+          POSTGRES_PASSWORD: ci-only-password
+          POSTGRES_DB: chat_test
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd "pg_isready -U chat -d chat_test"
+          --health-interval 3s --health-timeout 3s --health-retries 20
+    env:
+      POSTGRES_USER: chat
+      POSTGRES_PASSWORD: ci-only-password
+      POSTGRES_DB: chat_test
+      DB_HOST: 127.0.0.1
+      DB_PORT: 5432
+    steps:
+      - uses: actions/checkout@v4
+      - name: Dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y cmake g++ git libjsoncpp-dev libssl-dev zlib1g-dev libpq-dev uuid-dev
+          python3 -m pip install -r requirements-dev.txt
+      - name: Build pinned Drogon
+        run: |
+          git clone --branch v1.9.11 --depth 1 --recurse-submodules https://github.com/drogonframework/drogon.git /tmp/drogon
+          cmake -S /tmp/drogon -B /tmp/drogon-build -DCMAKE_BUILD_TYPE=Release -DBUILD_TESTING=OFF -DBUILD_EXAMPLES=OFF -DBUILD_CTL=OFF
+          cmake --build /tmp/drogon-build -j2
+          sudo cmake --install /tmp/drogon-build
+          sudo ldconfig
+      - name: Build and unit tests
+        run: |
+          cmake -S backend -B build -DCMAKE_BUILD_TYPE=Debug
+          cmake --build build -j2
+          ctest --test-dir build --output-on-failure
+          python3 -m unittest discover -s backend/tests -p test_migrations.py -v
+      - name: Migrations and idempotency
+        run: |
+          python3 scripts/migrate.py
+          python3 scripts/migrate.py
+          RUN_DB_TESTS=1 python3 -m unittest discover -s backend/tests -p test_migrations_db.py -v
+      - name: Health integration, DB available and unavailable
+        run: |
+          ./build/chat_backend backend/config/config.json > /tmp/chat.log 2>&1 &
+          backend_pid=$!
+          trap 'kill "$backend_pid" 2>/dev/null || true' EXIT
+          for attempt in $(seq 1 30); do
+            if curl -fsS http://127.0.0.1:8080/api/v1/health; then break; fi
+            sleep 1
+          done
+          python3 -m unittest discover -s backend/tests -p test_health.py -v
+          docker stop $(docker ps -q --filter ancestor=postgres:17.6-bookworm)
+          EXPECT_DB=down python3 -m unittest discover -s backend/tests -p test_health.py -v

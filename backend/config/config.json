@@ -1,0 +1,13 @@
+{
+  "listeners": [{"address": "127.0.0.1", "port": 8080}],
+  "db_clients": [{
+    "name": "default", "rdbms": "postgresql", "host": "127.0.0.1",
+    "port": 5432, "dbname": "", "user": "", "passwd": "",
+    "is_fast": false, "number_of_connections": 4, "timeout": 3.0
+  }],
+  "app": {
+    "number_of_threads": 2, "enable_session": false,
+    "enable_server_header": false, "client_max_body_size": "64K",
+    "log": {"log_level": "WARN"}
+  }
+}
